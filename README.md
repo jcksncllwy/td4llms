@@ -31,12 +31,55 @@ exec(op('export_network').text)
 
 See [`example_export.json`](example_export.json) for a real-world export from a Gaussian splatting project.
 
+## Filtering
+
+The full export can be huge (24MB+ for complex projects). Use filters to export only what you need. Set them at the top of `export_network.py`:
+
+```python
+# Only export TOP and CHOP operators
+FILTER_FAMILIES = ['TOP', 'CHOP']
+
+# Only export specific operator types
+FILTER_TYPES = ['moviefilein', 'null', 'geo']
+
+# Only export operators under a specific path
+FILTER_PATH_PREFIX = '/project1/fx'
+
+# Limit recursion depth
+FILTER_MAX_DEPTH = 3
+
+# Include/exclude by operator name (fnmatch patterns)
+INCLUDE_PATTERNS = ['render*', '*_out']
+EXCLUDE_PATTERNS = ['__*', 'local*']
+```
+
+All filters are optional and combine with AND logic. Leave as `None` to disable.
+
+Container operators (COMPs) are automatically kept in the output when they have matching descendants, so the hierarchy stays readable even with aggressive filtering.
+
+### Programmatic Usage
+
+You can also call `export_network()` as a function from another script or the Textport:
+
+```python
+# In the Textport or another DAT:
+exec(op('export_network').text)
+
+# Export only TOPs under /project1, 3 levels deep
+export_network(
+    path_prefix='/project1',
+    families=['TOP'],
+    max_depth=3,
+    output_filename='tops_only.json'
+)
+```
+
 ## Configuration
 
-In `export_network.py`, you can adjust:
+Other settings in `export_network.py`:
 
-- **`max_depth`** — how deep to recurse into nested COMPs (default: 6)
-- **Root operator** — change `op('/')` to export a subtree instead of the whole project
+- **`FILTER_MAX_DEPTH`** -- how deep to recurse into nested COMPs (default: 6)
+- **Root operator** -- change `op('/')` to export a subtree instead of the whole project
 
 ## Requirements
 
