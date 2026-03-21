@@ -504,7 +504,32 @@ def _render_family_reference(stats):
     return '\n'.join(lines)
 
 
-# ── CLI ──────────────────────────────────────────────────────────────
+# ── Config ───────────────────────────────────────────────────────────
+
+CONFIG_FILE = '.td4llms.json'
+
+
+def load_config(config_path=CONFIG_FILE):
+    """Load saved preferences from .td4llms.json."""
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_config(config, config_path=CONFIG_FILE):
+    """Save preferences to .td4llms.json."""
+    existing = load_config(config_path)
+    existing.update(config)
+    with open(config_path, 'w') as f:
+        json.dump(existing, f, indent=2)
+        f.write('\n')
+
+
+# ── CLAUDE.md Update ─────────────────────────────────────────────────
 
 
 _CLAUDE_MD_REFERENCE = (
@@ -540,17 +565,72 @@ def update_claude_md(output_name='TD_NETWORK.md', claude_md_path='CLAUDE.md'):
     return True
 
 
+# ── CLI ──────────────────────────────────────────────────────────────
+
+
+def _resolve_update_claude_md(args):
+    """Determine whether to update CLAUDE.md.
+
+    Priority:
+    1. Explicit CLI flags (--update-claude-md / --no-update-claude-md)
+    2. Saved preference in .td4llms.json
+    3. Interactive prompt (if TTY available)
+    4. Default to False (non-interactive / piped)
+    """
+    # Explicit flags win
+    if args.update_claude_md:
+        return True
+    if args.no_update_claude_md:
+        return False
+
+    # Check saved config
+    config = load_config()
+    if 'update_claude_md' in config:
+        return config['update_claude_md']
+
+    # No saved preference -- ask if interactive
+    if not sys.stdin.isatty():
+        return False
+
+    print("", file=sys.stderr)
+    print("Add a reference to CLAUDE.md so Claude Code can find "
+          "your network overview?", file=sys.stderr)
+    print("  This appends a one-liner pointing to the generated file.",
+          file=sys.stderr)
+    print("  (Your choice is saved in .td4llms.json for future runs.)",
+          file=sys.stderr)
+    print("", file=sys.stderr)
+
+    while True:
+        try:
+            answer = input("Update CLAUDE.md? [y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("", file=sys.stderr)
+            return False
+        if answer in ('y', 'yes'):
+            save_config({'update_claude_md': True})
+            return True
+        elif answer in ('n', 'no'):
+            save_config({'update_claude_md': False})
+            return False
+        print("  Please enter y or n.", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Generate a TD network overview from a TD4LLMs export.',
-        epilog='Example: python generate_claude_md.py export.json --update-claude-md'
+        epilog='Example: python generate_claude_md.py export.json'
     )
     parser.add_argument('export_file',
                         help='Path to the JSON or JSONL network export')
     parser.add_argument('-o', '--output', default='TD_NETWORK.md',
                         help='Output file path (default: TD_NETWORK.md)')
     parser.add_argument('--update-claude-md', action='store_true',
+                        default=False,
                         help='Add a reference to the output file in CLAUDE.md')
+    parser.add_argument('--no-update-claude-md', action='store_true',
+                        default=False,
+                        help='Do not update CLAUDE.md (overrides saved preference)')
     parser.add_argument('--claude-md', default='CLAUDE.md',
                         help='Path to CLAUDE.md (default: CLAUDE.md)')
     parser.add_argument('--template', default=None,
@@ -583,7 +663,8 @@ def main():
         print(f"Generated {args.output} "
               f"({len(md) / 1024:.1f} KB)", file=sys.stderr)
 
-        if args.update_claude_md:
+        should_update = _resolve_update_claude_md(args)
+        if should_update:
             output_name = os.path.basename(args.output)
             modified = update_claude_md(output_name, args.claude_md)
             if modified:
