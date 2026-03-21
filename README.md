@@ -38,21 +38,28 @@ In `export_network.py`, you can adjust:
 - **`max_depth`** — how deep to recurse into nested COMPs (default: 6)
 - **Root operator** — change `op('/')` to export a subtree instead of the whole project
 
-## Generate CLAUDE.md
+## Generate Network Overview
 
-Turn your export into a markdown project overview that Claude Code (or any LLM) can use as context:
+Turn your export into a markdown overview that Claude Code (or any LLM) can use as context:
 
 ```bash
-python generate_claude_md.py network_export.json -o CLAUDE.md
+# Generate TD_NETWORK.md (default output)
+python generate_claude_md.py network_export.json
+
+# Also add a reference in CLAUDE.md so Claude Code picks it up
+python generate_claude_md.py network_export.json --update-claude-md
 ```
 
-Drop the generated `CLAUDE.md` into your project folder and Claude Code automatically understands your TD network -- operator tree, signal flows, key parameters.
+This writes `TD_NETWORK.md` with the operator tree, signal flows, key parameters, and family reference. The `--update-claude-md` flag adds a one-liner to your `CLAUDE.md` pointing to it.
 
 ### Options
 
 ```bash
-# Print to stdout
-python generate_claude_md.py network_export.json
+# Print to stdout instead of a file
+python generate_claude_md.py network_export.json --stdout
+
+# Custom output path
+python generate_claude_md.py network_export.json -o my_network.md
 
 # Control tree depth (default: 3 levels)
 python generate_claude_md.py network_export.json --tree-depth 4
@@ -78,11 +85,14 @@ Create a markdown file with these placeholders:
 ### Programmatic Usage
 
 ```python
-from generate_claude_md import generate
+from generate_claude_md import generate, update_claude_md
 
 md = generate('network_export.json', tree_depth=4, max_params=10)
-with open('CLAUDE.md', 'w') as f:
+with open('TD_NETWORK.md', 'w') as f:
     f.write(md)
+
+# Optionally add reference to CLAUDE.md
+update_claude_md()
 ```
 
 ## Requirements

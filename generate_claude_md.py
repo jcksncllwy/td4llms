@@ -1,13 +1,17 @@
 """
-Generate a CLAUDE.md from a TD4LLMs network export.
+Generate a TD network overview from a TD4LLMs export.
 
 Reads a JSON or JSONL export and produces a markdown file that gives
 an LLM a high-level understanding of the TouchDesigner project --
 operator tree, signal flows, key parameters, and architecture.
 
+Default output is TD_NETWORK.md. Use --update-claude-md to also add
+a reference line to CLAUDE.md so Claude Code picks it up automatically.
+
 Usage:
     python generate_claude_md.py network_export.json
-    python generate_claude_md.py network_export.json -o CLAUDE.md
+    python generate_claude_md.py network_export.json -o TD_NETWORK.md
+    python generate_claude_md.py network_export.json --update-claude-md
     python generate_claude_md.py network_export.json --template my_template.md
     python generate_claude_md.py network_export.json --tree-depth 4 --max-params 10
 """
@@ -345,7 +349,7 @@ DEFAULT_TEMPLATE = """\
 
 
 def generate(export_path, template_path=None, tree_depth=3, max_params=20):
-    """Generate CLAUDE.md content from a network export.
+    """Generate TD network overview markdown from an export file.
 
     Args:
         export_path: Path to JSON or JSONL export file.
@@ -503,21 +507,60 @@ def _render_family_reference(stats):
 # ── CLI ──────────────────────────────────────────────────────────────
 
 
+_CLAUDE_MD_REFERENCE = (
+    '\n# TouchDesigner Network\n\n'
+    'See TD_NETWORK.md for the TouchDesigner network architecture '
+    '(operator tree, signal flows, parameters).\n'
+)
+
+
+def update_claude_md(output_name='TD_NETWORK.md', claude_md_path='CLAUDE.md'):
+    """Add a reference to the network overview in CLAUDE.md.
+
+    Appends a one-liner pointing to the network file. If CLAUDE.md
+    already references the file, does nothing. Creates CLAUDE.md
+    if it doesn't exist.
+
+    Returns True if CLAUDE.md was modified, False if already up to date.
+    """
+    reference = _CLAUDE_MD_REFERENCE.replace('TD_NETWORK.md', output_name)
+    marker = output_name
+
+    if os.path.exists(claude_md_path):
+        with open(claude_md_path) as f:
+            existing = f.read()
+        if marker in existing:
+            return False
+        with open(claude_md_path, 'a') as f:
+            f.write(reference)
+    else:
+        with open(claude_md_path, 'w') as f:
+            f.write(reference.lstrip('\n'))
+
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate a CLAUDE.md from a TD4LLMs network export.',
-        epilog='Example: python generate_claude_md.py network_export.json -o CLAUDE.md'
+        description='Generate a TD network overview from a TD4LLMs export.',
+        epilog='Example: python generate_claude_md.py export.json --update-claude-md'
     )
     parser.add_argument('export_file',
                         help='Path to the JSON or JSONL network export')
-    parser.add_argument('-o', '--output', default=None,
-                        help='Output file path (default: stdout)')
+    parser.add_argument('-o', '--output', default='TD_NETWORK.md',
+                        help='Output file path (default: TD_NETWORK.md)')
+    parser.add_argument('--update-claude-md', action='store_true',
+                        help='Add a reference to the output file in CLAUDE.md')
+    parser.add_argument('--claude-md', default='CLAUDE.md',
+                        help='Path to CLAUDE.md (default: CLAUDE.md)')
     parser.add_argument('--template', default=None,
                         help='Path to a custom markdown template')
     parser.add_argument('--tree-depth', type=int, default=3,
                         help='Max depth for the operator tree (default: 3)')
     parser.add_argument('--max-params', type=int, default=20,
                         help='Max parameter entries to show (default: 20)')
+    parser.add_argument('--stdout', action='store_true',
+                        help='Print to stdout instead of writing a file')
 
     args = parser.parse_args()
 
@@ -532,13 +575,23 @@ def main():
         max_params=args.max_params,
     )
 
-    if args.output:
+    if args.stdout:
+        print(md)
+    else:
         with open(args.output, 'w') as f:
             f.write(md)
         print(f"Generated {args.output} "
               f"({len(md) / 1024:.1f} KB)", file=sys.stderr)
-    else:
-        print(md)
+
+        if args.update_claude_md:
+            output_name = os.path.basename(args.output)
+            modified = update_claude_md(output_name, args.claude_md)
+            if modified:
+                print(f"Added reference to {output_name} in "
+                      f"{args.claude_md}", file=sys.stderr)
+            else:
+                print(f"{args.claude_md} already references "
+                      f"{output_name}", file=sys.stderr)
 
 
 if __name__ == '__main__':
