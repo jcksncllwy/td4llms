@@ -44,10 +44,10 @@ Turn your export into a markdown overview that Claude Code (or any LLM) can use 
 
 ```bash
 # Generate TD_NETWORK.md (default output)
-python generate_claude_md.py network_export.json
+python generate_network_summary.py network_export.json
 
 # Also add a reference in CLAUDE.md so Claude Code picks it up
-python generate_claude_md.py network_export.json --update-claude-md
+python generate_network_summary.py network_export.json --update-claude-md
 ```
 
 This writes `TD_NETWORK.md` with the operator tree, signal flows, key parameters, and family reference. The `--update-claude-md` flag adds a one-liner to your `CLAUDE.md` pointing to it.
@@ -56,19 +56,19 @@ This writes `TD_NETWORK.md` with the operator tree, signal flows, key parameters
 
 ```bash
 # Print to stdout instead of a file
-python generate_claude_md.py network_export.json --stdout
+python generate_network_summary.py network_export.json --stdout
 
 # Custom output path
-python generate_claude_md.py network_export.json -o my_network.md
+python generate_network_summary.py network_export.json -o my_network.md
 
 # Control tree depth (default: 3 levels)
-python generate_claude_md.py network_export.json --tree-depth 4
+python generate_network_summary.py network_export.json --tree-depth 4
 
 # Limit parameter entries (default: 20)
-python generate_claude_md.py network_export.json --max-params 10
+python generate_network_summary.py network_export.json --max-params 10
 
 # Use a custom template
-python generate_claude_md.py network_export.json --template my_template.md
+python generate_network_summary.py network_export.json --template my_template.md
 ```
 
 ### Custom Templates
@@ -85,7 +85,7 @@ Create a markdown file with these placeholders:
 ### Programmatic Usage
 
 ```python
-from generate_claude_md import generate, update_claude_md
+from generate_network_summary import generate, update_claude_md
 
 md = generate('network_export.json', tree_depth=4, max_params=10)
 with open('TD_NETWORK.md', 'w') as f:
@@ -98,7 +98,7 @@ update_claude_md()
 ## Requirements
 
 - TouchDesigner (tested on 2023.x+) for `export_network.py`
-- Python 3.6+ for `generate_claude_md.py` (no external dependencies)
+- Python 3.6+ for `generate_network_summary.py` (no external dependencies)
 
 ## License
 

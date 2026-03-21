@@ -9,11 +9,11 @@ Default output is TD_NETWORK.md. Use --update-claude-md to also add
 a reference line to CLAUDE.md so Claude Code picks it up automatically.
 
 Usage:
-    python generate_claude_md.py network_export.json
-    python generate_claude_md.py network_export.json -o TD_NETWORK.md
-    python generate_claude_md.py network_export.json --update-claude-md
-    python generate_claude_md.py network_export.json --template my_template.md
-    python generate_claude_md.py network_export.json --tree-depth 4 --max-params 10
+    python generate_network_summary.py network_export.json
+    python generate_network_summary.py network_export.json -o TD_NETWORK.md
+    python generate_network_summary.py network_export.json --update-claude-md
+    python generate_network_summary.py network_export.json --template my_template.md
+    python generate_network_summary.py network_export.json --tree-depth 4 --max-params 10
 """
 
 import json
@@ -54,11 +54,11 @@ def _load_jsonl(path):
     if not ops:
         return {}
 
-    # Build lookup by path
-    by_path = {op['path']: op for op in ops}
+    # Build lookup by path (skip entries missing a path key)
+    by_path = {op['path']: op for op in ops if 'path' in op}
 
     # Reconstruct parent-child relationships from paths
-    for op in ops:
+    for op in by_path.values():
         op_path = op['path']
         parent_path = op_path.rsplit('/', 1)[0] or '/'
         if parent_path != op_path and parent_path in by_path:
@@ -282,7 +282,7 @@ def _render_node(node, lines, max_depth, depth, indent):
 
     # Show inputs if any
     if inputs:
-        input_names = [p.rsplit('/', 1)[-1] for p in inputs]
+        input_names = [p.rstrip('/').rsplit('/', 1)[-1] or p for p in inputs]
         label += f"  <- {', '.join(input_names)}"
 
     lines.append(f"{prefix}{label}")
