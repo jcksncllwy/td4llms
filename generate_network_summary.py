@@ -68,7 +68,7 @@ def _load_jsonl(path):
     # Root is the entry with path '/' or the shallowest path
     root = by_path.get('/')
     if not root:
-        root = min(ops, key=lambda o: o['path'].count('/'))
+        root = min(by_path.values(), key=lambda o: o['path'].count('/'))
 
     return _normalize_node(root)
 
