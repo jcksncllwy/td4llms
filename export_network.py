@@ -125,7 +125,7 @@ def serialize_par(par):
     try:
         if par.isDefault:
             return None
-    except:
+    except (AttributeError, TypeError):
         return None
 
     # Skip pulse buttons, headers, and read-only params with no expression
@@ -134,7 +134,7 @@ def serialize_par(par):
             return None
         if par.readOnly and par.mode == ParMode.CONSTANT:
             return None
-    except:
+    except (AttributeError, TypeError):
         pass
 
     result = {}
@@ -147,22 +147,22 @@ def serialize_par(par):
             # Export mode: parameter is driven by an export CHOP/DAT
             try:
                 result['export'] = par.exportSource.path if par.exportSource else True
-            except:
+            except (AttributeError, TypeError):
                 result['export'] = True
         elif mode == ParMode.BIND:
             # Bind mode: parameter references another parameter
             try:
                 result['bind'] = par.bindExpr
-            except:
+            except (AttributeError, TypeError):
                 result['bind'] = True
         else:
             # Constant mode -- just store the value
             result['val'] = par.val
-    except:
+    except (AttributeError, TypeError):
         # Fallback: try to get any value
         try:
             result['val'] = par.val
-        except:
+        except (AttributeError, TypeError):
             return None
 
     if not result:
@@ -183,12 +183,12 @@ def serialize_par_full(par):
 
     try:
         base['style'] = par.style
-    except:
+    except (AttributeError, TypeError):
         pass
     try:
         if par.label and par.label != par.name:
             base['label'] = par.label
-    except:
+    except (AttributeError, TypeError):
         pass
 
     return base
@@ -221,7 +221,7 @@ def serialize_params(operator):
                     params[par.name] = data['val']
                 else:
                     params[par.name] = data
-    except:
+    except Exception:
         pass
 
     return params if params else None
@@ -254,26 +254,25 @@ def serialize_op(operator, depth=0):
     if params:
         node['params'] = params
 
-    # Connections: inputs (compact format -- just paths)
+    # Connections: inputs (compact format -- path array with None for empty slots)
     try:
-        inputs = []
-        for i, inp in enumerate(operator.inputs):
-            if inp is not None:
-                inputs.append(inp.path)
+        inputs = [inp.path if inp is not None else None for inp in operator.inputs]
+        # Strip trailing Nones but preserve internal gaps for slot accuracy
+        while inputs and inputs[-1] is None:
+            inputs.pop()
         if inputs:
             node['inputs'] = inputs
-    except:
+    except Exception:
         pass
 
-    # Connections: outputs (compact format -- just paths)
+    # Connections: outputs (compact format -- path array with None for empty slots)
     try:
-        outputs = []
-        for i, out in enumerate(operator.outputs):
-            if out is not None:
-                outputs.append(out.path)
+        outputs = [out.path if out is not None else None for out in operator.outputs]
+        while outputs and outputs[-1] is None:
+            outputs.pop()
         if outputs:
             node['outputs'] = outputs
-    except:
+    except Exception:
         pass
 
     # Recurse into children (COMPs only)
@@ -289,7 +288,7 @@ def serialize_op(operator, depth=0):
                     children.append(child_data)
             if children:
                 node['children'] = children
-    except:
+    except Exception:
         pass
 
     # Filtering logic:
@@ -420,39 +419,4 @@ def export_network(root_path='/', output_filename=None,
 
 
 # When run directly (exec from Text DAT), use module-level config
-root = op('/')
-data = serialize_op(root)
-
-if OUTPUT_FORMAT == 'jsonl':
-    _ops = flatten_ops(data) if data else []
-    _output_path = project.folder + '/network_export.jsonl'
-    with open(_output_path, 'w') as f:
-        for _entry in _ops:
-            f.write(json.dumps(_entry, default=str) + '\n')
-    _size_kb = sum(len(json.dumps(e, default=str)) for e in _ops) / 1024
-    print(f"Exported {len(_ops)} operators to: {_output_path}")
-else:
-    _indent = None if OUTPUT_MODE == 'compact' else 2
-    _json_str = json.dumps(data, indent=_indent, default=str)
-    _output_path = project.folder + '/network_export.json'
-    with open(_output_path, 'w') as f:
-        f.write(_json_str)
-    _size_kb = len(_json_str) / 1024
-    print(f"Exported network to: {_output_path}")
-
-print(f"Output size: {_size_kb:.0f} KB")
-print(f"Mode: {OUTPUT_MODE}, Format: {OUTPUT_FORMAT}")
-
-if has_active_filters():
-    _filters = []
-    if FILTER_FAMILIES:
-        _filters.append(f"families={FILTER_FAMILIES}")
-    if FILTER_TYPES:
-        _filters.append(f"types={FILTER_TYPES}")
-    if FILTER_PATH_PREFIX:
-        _filters.append(f"path_prefix={FILTER_PATH_PREFIX}")
-    if INCLUDE_PATTERNS:
-        _filters.append(f"include={INCLUDE_PATTERNS}")
-    if EXCLUDE_PATTERNS:
-        _filters.append(f"exclude={EXCLUDE_PATTERNS}")
-    print(f"Active filters: {', '.join(_filters)}")
+export_network()
