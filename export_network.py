@@ -1,10 +1,21 @@
 """
-Export TouchDesigner network to JSON using TDJSON for parameter serialization.
+Export TouchDesigner network to JSON for LLM context.
 
 Run from a Text DAT or paste into the textport:
     exec(op('export_network').text)
 
 Outputs to: [project folder]/network_export.json
+
+## Output Modes
+
+    OUTPUT_MODE = 'compact'   Only non-default parameters (recommended, smallest)
+    OUTPUT_MODE = 'summary'   Operator tree + connections only, no parameters
+    OUTPUT_MODE = 'full'      All non-default parameters with metadata (style, mode)
+
+## Output Formats
+
+    OUTPUT_FORMAT = 'json'    Nested JSON (default)
+    OUTPUT_FORMAT = 'jsonl'   Flat JSONL, one operator per line (grep-friendly)
 
 ## Filtering
 
@@ -25,6 +36,12 @@ so the hierarchy stays intact even when filtering by type or family.
 import json
 from fnmatch import fnmatch
 
+# ─── Output Configuration ────────────────────────────────────────────
+# Controls how much detail is exported and in what format.
+
+OUTPUT_MODE = 'compact'        # 'compact', 'summary', or 'full'
+OUTPUT_FORMAT = 'json'         # 'json' or 'jsonl'
+
 # ─── Filter Configuration ─────────────────────────────────────────────
 # Set these to control what gets exported. None or [] means "no filter".
 
@@ -36,12 +53,6 @@ INCLUDE_PATTERNS = None         # e.g. ['render*', '*_out'] (fnmatch on op name)
 EXCLUDE_PATTERNS = None         # e.g. ['__*', 'local*'] (fnmatch on op name)
 
 # ─── End Configuration ─────────────────────────────────────────────────
-
-try:
-    import TDJSON
-    HAS_TDJSON = True
-except ImportError:
-    HAS_TDJSON = False
 
 
 def matches_filters(operator):
@@ -98,6 +109,126 @@ def has_active_filters():
                 INCLUDE_PATTERNS, EXCLUDE_PATTERNS])
 
 
+# ─── Parameter Serialization ─────────────────────────────────────────
+
+# Parameter styles that are never useful to export
+_SKIP_STYLES = {'Pulse', 'Header'}
+
+
+def serialize_par(par):
+    """Serialize a single non-default parameter.
+
+    Returns a dict with the parameter value (and expression/mode if
+    not in constant mode). Returns None for parameters that should
+    be skipped (pulses, headers, read-only with no expression).
+    """
+    try:
+        if par.isDefault:
+            return None
+    except (AttributeError, TypeError):
+        return None
+
+    # Skip pulse buttons, headers, and read-only params with no expression
+    try:
+        if par.style in _SKIP_STYLES:
+            return None
+        if par.readOnly and par.mode == ParMode.CONSTANT:
+            return None
+    except (AttributeError, TypeError):
+        pass
+
+    result = {}
+
+    try:
+        mode = par.mode
+        if mode == ParMode.EXPRESSION:
+            result['expr'] = par.expr
+        elif mode == ParMode.EXPORT:
+            # Export mode: parameter is driven by an export CHOP/DAT
+            try:
+                result['export'] = par.exportSource.path if par.exportSource else True
+            except (AttributeError, TypeError):
+                result['export'] = True
+        elif mode == ParMode.BIND:
+            # Bind mode: parameter references another parameter
+            try:
+                result['bind'] = par.bindExpr
+            except (AttributeError, TypeError):
+                result['bind'] = True
+        else:
+            # Constant mode -- just store the value
+            result['val'] = par.val
+    except (AttributeError, TypeError):
+        # Fallback: try to get any value
+        try:
+            result['val'] = par.val
+        except (AttributeError, TypeError):
+            return None
+
+    if not result:
+        return None
+
+    return result
+
+
+def serialize_par_full(par):
+    """Serialize a non-default parameter with full metadata.
+
+    Includes style (type), label, and range info in addition to value.
+    Used by OUTPUT_MODE = 'full'.
+    """
+    base = serialize_par(par)
+    if base is None:
+        return None
+
+    try:
+        base['style'] = par.style
+    except (AttributeError, TypeError):
+        pass
+    try:
+        if par.label and par.label != par.name:
+            base['label'] = par.label
+    except (AttributeError, TypeError):
+        pass
+
+    return base
+
+
+def serialize_params(operator):
+    """Serialize all non-default parameters for an operator.
+
+    Returns a dict of {par_name: value_or_info} for parameters that
+    differ from their defaults. Returns None if no non-default params.
+
+    In compact mode, constant-mode parameters are stored as bare values:
+        {"file": "/path/to/file.mov", "resolutionw": 1920}
+
+    Parameters with expressions/binds/exports use nested dicts:
+        {"tx": {"expr": "absTime.seconds"}}
+    """
+    if OUTPUT_MODE == 'summary':
+        return None
+
+    serialize_fn = serialize_par_full if OUTPUT_MODE == 'full' else serialize_par
+    params = {}
+
+    try:
+        for par in operator.pars():
+            data = serialize_fn(par)
+            if data is not None:
+                # In compact mode, flatten constant-mode params to bare values
+                if OUTPUT_MODE == 'compact' and list(data.keys()) == ['val']:
+                    params[par.name] = data['val']
+                else:
+                    params[par.name] = data
+    except Exception:
+        pass
+
+    return params if params else None
+
+
+# ─── Operator Serialization ──────────────────────────────────────────
+
 def serialize_op(operator, depth=0):
     """Serialize an operator and its children recursively.
 
@@ -118,47 +249,30 @@ def serialize_op(operator, depth=0):
         'family': operator.family,
     }
 
-    # Use TDJSON to serialize each parameter page
-    if HAS_TDJSON:
-        try:
-            pages = {}
-            for page in operator.pages:
-                page_data = TDJSON.serializeTDData(page, verbose=True)
-                if page_data:
-                    pages[page.name] = page_data
-            if pages:
-                node['pages'] = pages
-        except:
-            pass
+    # Parameters (non-default only)
+    params = serialize_params(operator)
+    if params:
+        node['params'] = params
 
-    # Connections: inputs
+    # Connections: inputs (compact format -- path array with None for empty slots)
     try:
-        inputs = []
-        for i, inp in enumerate(operator.inputs):
-            if inp is not None:
-                inputs.append({
-                    'index': i,
-                    'path': inp.path,
-                    'name': inp.name,
-                })
+        inputs = [inp.path if inp is not None else None for inp in operator.inputs]
+        # Strip trailing Nones but preserve internal gaps for slot accuracy
+        while inputs and inputs[-1] is None:
+            inputs.pop()
         if inputs:
             node['inputs'] = inputs
-    except:
+    except Exception:
         pass
 
-    # Connections: outputs
+    # Connections: outputs (compact format -- path array with None for empty slots)
     try:
-        outputs = []
-        for i, out in enumerate(operator.outputs):
-            if out is not None:
-                outputs.append({
-                    'index': i,
-                    'path': out.path,
-                    'name': out.name,
-                })
+        outputs = [out.path if out is not None else None for out in operator.outputs]
+        while outputs and outputs[-1] is None:
+            outputs.pop()
         if outputs:
             node['outputs'] = outputs
-    except:
+    except Exception:
         pass
 
     # Recurse into children (COMPs only)
@@ -174,7 +288,7 @@ def serialize_op(operator, depth=0):
                     children.append(child_data)
             if children:
                 node['children'] = children
-    except:
+    except Exception:
         pass
 
     # Filtering logic:
@@ -194,32 +308,52 @@ def serialize_op(operator, depth=0):
     return node
 
 
+# ─── JSONL Flattening ─────────────────────────────────────────────────
+
+def flatten_ops(node):
+    """Flatten a nested operator tree into a list of operators.
+
+    Each operator keeps its path (encodes hierarchy) but children
+    are extracted into separate entries. Used for JSONL output.
+    """
+    ops = []
+    flat_node = {k: v for k, v in node.items() if k != 'children'}
+    ops.append(flat_node)
+    for child in node.get('children', []):
+        ops.extend(flatten_ops(child))
+    return ops
+
+
 # ─── Main ──────────────────────────────────────────────────────────────
 
-def export_network(root_path='/', output_filename='network_export.json',
+def export_network(root_path='/', output_filename=None,
                    families=None, types=None, path_prefix=None,
                    max_depth=None, include_patterns=None,
-                   exclude_patterns=None):
-    """Export the operator network to JSON with optional filtering.
+                   exclude_patterns=None, output_mode=None,
+                   output_format=None):
+    """Export the operator network with optional filtering and format control.
 
     Can be called as a function for programmatic use, or the script
     can be run directly with the module-level configuration variables.
 
     Args:
         root_path: Starting operator path (default: '/')
-        output_filename: Output filename in project folder
+        output_filename: Output filename in project folder (auto-set if None)
         families: List of operator families, e.g. ['TOP', 'CHOP']
         types: List of operator types, e.g. ['moviefilein', 'null']
         path_prefix: Only export ops under this path
         max_depth: Max recursion depth (default: 6)
         include_patterns: fnmatch patterns for operator names to include
         exclude_patterns: fnmatch patterns for operator names to exclude
+        output_mode: 'compact', 'summary', or 'full'
+        output_format: 'json' or 'jsonl'
 
     Returns:
-        The serialized data dict.
+        The serialized data (dict for json, list for jsonl).
     """
     global FILTER_FAMILIES, FILTER_TYPES, FILTER_PATH_PREFIX
     global FILTER_MAX_DEPTH, INCLUDE_PATTERNS, EXCLUDE_PATTERNS
+    global OUTPUT_MODE, OUTPUT_FORMAT
 
     if families is not None:
         FILTER_FAMILIES = families
@@ -233,13 +367,38 @@ def export_network(root_path='/', output_filename='network_export.json',
         INCLUDE_PATTERNS = include_patterns
     if exclude_patterns is not None:
         EXCLUDE_PATTERNS = exclude_patterns
+    if output_mode is not None:
+        OUTPUT_MODE = output_mode
+    if output_format is not None:
+        OUTPUT_FORMAT = output_format
+
+    # Default filename based on format
+    if output_filename is None:
+        ext = 'jsonl' if OUTPUT_FORMAT == 'jsonl' else 'json'
+        output_filename = f'network_export.{ext}'
 
     root = op(root_path)
     data = serialize_op(root)
 
     output_path = project.folder + '/' + output_filename
-    with open(output_path, 'w') as f:
-        json.dump(data, f, indent=2, default=str)
+
+    if OUTPUT_FORMAT == 'jsonl':
+        ops = flatten_ops(data) if data else []
+        with open(output_path, 'w') as f:
+            for entry in ops:
+                f.write(json.dumps(entry, default=str) + '\n')
+        size_kb = sum(len(json.dumps(e, default=str)) for e in ops) / 1024
+        print(f"Exported {len(ops)} operators to: {output_path}")
+    else:
+        indent = None if OUTPUT_MODE == 'compact' else 2
+        json_str = json.dumps(data, indent=indent, default=str)
+        with open(output_path, 'w') as f:
+            f.write(json_str)
+        size_kb = len(json_str) / 1024
+        print(f"Exported network to: {output_path}")
+
+    print(f"Output size: {size_kb:.0f} KB")
+    print(f"Mode: {OUTPUT_MODE}, Format: {OUTPUT_FORMAT}")
 
     active = []
     if FILTER_FAMILIES:
@@ -253,36 +412,11 @@ def export_network(root_path='/', output_filename='network_export.json',
     if EXCLUDE_PATTERNS:
         active.append('exclude=' + str(EXCLUDE_PATTERNS))
     active.append('max_depth=' + str(FILTER_MAX_DEPTH))
-
-    size_kb = len(json.dumps(data, default=str)) / 1024
-    print(f"Exported network to: {output_path}")
-    print(f"Total JSON size: {size_kb:.0f} KB")
     if active:
         print(f"Active filters: {', '.join(active)}")
 
-    return data
+    return ops if OUTPUT_FORMAT == 'jsonl' else data
 
 
 # When run directly (exec from Text DAT), use module-level config
-root = op('/')
-data = serialize_op(root)
-
-output_path = project.folder + '/network_export.json'
-with open(output_path, 'w') as f:
-    json.dump(data, f, indent=2, default=str)
-
-print(f"Exported network to: {output_path}")
-print(f"Total JSON size: {len(json.dumps(data, default=str)) / 1024:.0f} KB")
-if has_active_filters():
-    filters = []
-    if FILTER_FAMILIES:
-        filters.append(f"families={FILTER_FAMILIES}")
-    if FILTER_TYPES:
-        filters.append(f"types={FILTER_TYPES}")
-    if FILTER_PATH_PREFIX:
-        filters.append(f"path_prefix={FILTER_PATH_PREFIX}")
-    if INCLUDE_PATTERNS:
-        filters.append(f"include={INCLUDE_PATTERNS}")
-    if EXCLUDE_PATTERNS:
-        filters.append(f"exclude={EXCLUDE_PATTERNS}")
-    print(f"Active filters: {', '.join(filters)}")
+export_network()

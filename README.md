@@ -2,11 +2,11 @@
 
 Export your TouchDesigner network to JSON so LLMs can understand your project.
 
-TD4LLMs serializes your entire TD network — operators, parameters, connections, and hierarchy — into a structured JSON file. Feed it to Claude, ChatGPT, or any LLM to get help debugging, documenting, or extending your TouchDesigner projects.
+TD4LLMs serializes your TD network -- operators, parameters, connections, and hierarchy -- into a compact format designed for LLM context windows. Feed it to Claude, ChatGPT, or any LLM to get help debugging, documenting, or extending your TouchDesigner projects.
 
 ## Why?
 
-TouchDesigner's `.toe` files are binary — LLMs can't read them. TD4LLMs bridges that gap by exporting a complete, human-readable representation of your network that gives an LLM full context about your project's structure.
+TouchDesigner's `.toe` files are binary -- LLMs can't read them. TD4LLMs bridges that gap by exporting a human-readable representation of your network. Only non-default parameters are included, so the output is small enough to paste directly into an LLM conversation.
 
 ## Quick Start
 
@@ -17,23 +17,73 @@ TouchDesigner's `.toe` files are binary — LLMs can't read them. TD4LLMs bridge
 exec(op('export_network').text)
 ```
 
-3. Find `network_export.json` in your project folder
-4. Paste the JSON into your LLM conversation for context
+3. Find `network_export.json` (or `.jsonl`) in your project folder
+4. Paste the output into your LLM conversation for context
 
 ## What Gets Exported
 
-- **Operator tree** — full hierarchy with paths, names, types, and families
-- **Parameters** — all parameter pages serialized via TDJSON (TouchDesigner's built-in serializer)
-- **Connections** — input/output wiring between operators
-- **Recursion** — descends into COMPs up to a configurable depth (default: 6 levels)
+- **Operator tree** -- full hierarchy with paths, names, types, and families
+- **Parameters** -- only non-default values (parameters you actually changed)
+- **Connections** -- input/output wiring between operators as path arrays
+- **Recursion** -- descends into COMPs up to a configurable depth (default: 6 levels)
 
-## Example
+## Output Modes
 
-See [`example_export.json`](example_export.json) for a real-world export from a Gaussian splatting project.
+Control how much detail is exported with `OUTPUT_MODE` at the top of the script:
+
+| Mode | What's included | Best for |
+|------|----------------|----------|
+| `compact` (default) | Non-default params as bare values | Day-to-day LLM use |
+| `summary` | Operator tree + connections only, no params | Architecture overview |
+| `full` | Non-default params with metadata (style, mode) | Debugging parameter issues |
+
+### Compact mode example
+
+```json
+{
+  "path": "/project1/render1",
+  "name": "render1",
+  "type": "glslmulti",
+  "family": "TOP",
+  "params": {"resolutionw": 1920, "resolutionh": 1080, "outputresolution": 9},
+  "inputs": ["/project1/noise1", "/project1/feedback1"]
+}
+```
+
+Parameters you never touched are omitted. Expressions, binds, and exports are preserved:
+
+```json
+{
+  "params": {
+    "tx": {"expr": "absTime.seconds * 0.1"},
+    "opacity": {"bind": "op('ctrl')['opacity']"},
+    "file": "/path/to/video.mov"
+  }
+}
+```
+
+### Summary mode example
+
+```json
+{"path": "/project1/render1", "type": "glslmulti", "family": "TOP", "inputs": ["/project1/noise1"]}
+```
+
+No parameters at all -- just the network graph.
+
+## Output Formats
+
+Set `OUTPUT_FORMAT` at the top of the script:
+
+| Format | Description | Output file |
+|--------|------------|-------------|
+| `json` (default) | Nested JSON tree | `network_export.json` |
+| `jsonl` | Flat JSONL, one operator per line | `network_export.jsonl` |
+
+**JSONL** is useful for very large networks -- you can grep it, load specific operators, or stream it line by line. Each line is a self-contained JSON object with the operator's `path` encoding its position in the hierarchy.
 
 ## Filtering
 
-The full export can be huge (24MB+ for complex projects). Use filters to export only what you need. Set them at the top of `export_network.py`:
+Use filters to export only what you need. Set them at the top of `export_network.py`:
 
 ```python
 # Only export TOP and CHOP operators
@@ -65,26 +115,42 @@ You can also call `export_network()` as a function from another script or the Te
 # In the Textport or another DAT:
 exec(op('export_network').text)
 
-# Export only TOPs under /project1, 3 levels deep
+# Export only TOPs under /project1, summary mode, as JSONL
 export_network(
     path_prefix='/project1',
     families=['TOP'],
     max_depth=3,
-    output_filename='tops_only.json'
+    output_mode='summary',
+    output_format='jsonl',
+    output_filename='tops_summary.jsonl'
 )
 ```
 
+## Size Comparison
+
+On a real-world Gaussian splatting project (19,377 operators):
+
+| Configuration | Size | Reduction |
+|--------------|------|-----------|
+| Original (pretty JSON, all pages) | 23.5 MB | -- |
+| Compact JSON (non-default params, minified) | ~2.9 MB | 88% |
+| Summary JSONL (tree + connections only) | ~2.4 MB | 90% |
+
+With filtering applied (e.g., only TOPs in one subtree), output typically drops to KB range.
+
 ## Configuration
 
-Other settings in `export_network.py`:
+Settings at the top of `export_network.py`:
 
+- **`OUTPUT_MODE`** -- `'compact'`, `'summary'`, or `'full'` (default: `'compact'`)
+- **`OUTPUT_FORMAT`** -- `'json'` or `'jsonl'` (default: `'json'`)
 - **`FILTER_MAX_DEPTH`** -- how deep to recurse into nested COMPs (default: 6)
 - **Root operator** -- change `op('/')` to export a subtree instead of the whole project
 
 ## Requirements
 
 - TouchDesigner (tested on 2023.x+)
-- Uses the built-in `TDJSON` module (no external dependencies)
+- No external dependencies (uses TD's built-in `Par` API directly)
 
 ## License
 
