@@ -368,7 +368,7 @@ def _detect_templates(root_node):
     values become overrides.
 
     Returns:
-        templates: dict of {template_id: {type, family, params (common values)}}
+        templates: dict of {template_id: {type, family}}
         The root_node is modified in-place -- templateable operators get
         'template' and optional 'overrides' keys, with type/family/params removed.
     """
@@ -418,33 +418,22 @@ def _detect_templates(root_node):
 # ─── Metadata Generation ─────────────────────────────────────────────
 
 def _generate_meta(root_node, graph_edges):
-    """Generate the _meta section with network statistics."""
-    total_ops = 0
-    type_census = {}
+    """Generate the _meta section with network statistics.
+
+    Must be called BEFORE _detect_templates, which pops type/family
+    from templated nodes.
+    """
+    total_ops = _count_subtree(root_node)
     subsystems = {}
 
-    def count_ops(node, depth=0, subsystem=None):
-        nonlocal total_ops
-        total_ops += 1
-        key = node.get('type', node.get('template', '?')) + '/' + node.get('family', '?')
-        type_census[key] = type_census.get(key, 0) + 1
-
-        if depth == 1:
-            subsystem = node['path']
-
-        if subsystem and depth == 1:
-            sub_count = _count_subtree(node)
-            sub_types = {}
-            _count_types(node, sub_types)
-            subsystems[node['path']] = {
-                'ops': sub_count,
-                'types': sub_types,
-            }
-
-        for child in node.get('children', []):
-            count_ops(child, depth + 1, subsystem)
-
-    count_ops(root_node)
+    for child in root_node.get('children', []):
+        sub_count = _count_subtree(child)
+        sub_types = {}
+        _count_types(child, sub_types)
+        subsystems[child['path']] = {
+            'ops': sub_count,
+            'types': sub_types,
+        }
 
     # Cross-subsystem connections
     cross_edges = []
@@ -553,11 +542,11 @@ def export_network(root_path='/', output_filename=None,
     root = op(root_path)
     operator_tree = serialize_op(root)
 
+    # Generate metadata (must run before template detection, which pops type/family)
+    meta = _generate_meta(operator_tree, _graph_edges) if operator_tree else {}
+
     # Detect templates (modifies tree in-place)
     templates = _detect_templates(operator_tree) if operator_tree else {}
-
-    # Generate metadata
-    meta = _generate_meta(operator_tree, _graph_edges) if operator_tree else {}
 
     # Build structured output
     export_data = {
@@ -577,10 +566,11 @@ def export_network(root_path='/', output_filename=None,
             header = {'_meta': meta, 'graph': _graph_edges}
             if templates:
                 header['templates'] = templates
-            f.write(json.dumps(header, default=str) + '\n')
+            header_str = json.dumps(header, default=str)
+            f.write(header_str + '\n')
             for entry in ops:
                 f.write(json.dumps(entry, default=str) + '\n')
-        size_kb = sum(len(json.dumps(e, default=str)) for e in ops) / 1024
+        size_kb = (len(header_str) + sum(len(json.dumps(e, default=str)) for e in ops)) / 1024
         print(f"Exported {len(ops)} operators to: {output_path}")
     else:
         indent = None if OUTPUT_MODE == 'compact' else 2
