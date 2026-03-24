@@ -17,6 +17,14 @@ Outputs to: [project folder]/network_export.json
     OUTPUT_FORMAT = 'json'    Nested JSON (default)
     OUTPUT_FORMAT = 'jsonl'   Flat JSONL, one operator per line (grep-friendly)
 
+## System Filtering
+
+    EXCLUDE_SYSTEM = True     Skip /sys and /ui subtrees (default: True)
+
+TD projects contain thousands of system and UI operators that are identical
+across all projects. These are noise for LLM context. Set to False only if
+you specifically need to inspect TD internals.
+
 ## Filtering
 
 Set any combination of filters below to reduce the export size.
@@ -42,6 +50,16 @@ from fnmatch import fnmatch
 OUTPUT_MODE = 'compact'        # 'compact', 'summary', or 'full'
 OUTPUT_FORMAT = 'json'         # 'json' or 'jsonl'
 
+# ─── System Filtering ─────────────────────────────────────────────────
+# TD projects contain thousands of system/UI operators identical across
+# all projects. Exclude them by default to focus on user content.
+
+EXCLUDE_SYSTEM = True           # Skip /sys, /ui subtrees
+
+# Paths excluded when EXCLUDE_SYSTEM is True. These are TD internal
+# subsystems that are the same in every project.
+_SYSTEM_PATHS = ('/sys', '/ui')
+
 # ─── Filter Configuration ─────────────────────────────────────────────
 # Set these to control what gets exported. None or [] means "no filter".
 
@@ -53,6 +71,31 @@ INCLUDE_PATTERNS = None         # e.g. ['render*', '*_out'] (fnmatch on op name)
 EXCLUDE_PATTERNS = None         # e.g. ['__*', 'local*'] (fnmatch on op name)
 
 # ─── End Configuration ─────────────────────────────────────────────────
+
+
+# ─── Graph Collector ──────────────────────────────────────────────────
+# Accumulates connection edges during serialization for the top-level
+# relationship graph. Three edge types:
+#   ["input",  src_path, dst_path, slot]  -- data flow
+#   ["bind",   src_expr, dst_path:par]    -- parameter bind
+#   ["export", src_path, dst_path:par]    -- CHOP/DAT export
+
+_graph_edges = []
+
+
+def _reset_graph():
+    global _graph_edges
+    _graph_edges = []
+
+
+# ─── Filter Functions ─────────────────────────────────────────────────
+
+def _is_system_path(path):
+    """Check if a path is under a TD system subtree."""
+    for sp in _SYSTEM_PATHS:
+        if path == sp or path.startswith(sp + '/'):
+            return True
+    return False
 
 
 def matches_filters(operator):
@@ -94,17 +137,15 @@ def path_could_contain_prefix(op_path):
     if not FILTER_PATH_PREFIX:
         return True
     prefix = FILTER_PATH_PREFIX.rstrip('/')
-    # Operator is at or under the prefix
     if op_path.startswith(prefix + '/') or op_path == prefix:
         return True
-    # Prefix is deeper than this operator (children might match)
     if prefix.startswith(op_path + '/') or prefix == op_path:
         return True
     return False
 
 
 def has_active_filters():
-    """Return True if any filter other than max_depth is set."""
+    """Return True if any filter other than max_depth and EXCLUDE_SYSTEM is set."""
     return any([FILTER_FAMILIES, FILTER_TYPES, FILTER_PATH_PREFIX,
                 INCLUDE_PATTERNS, EXCLUDE_PATTERNS])
 
@@ -115,12 +156,15 @@ def has_active_filters():
 _SKIP_STYLES = {'Pulse', 'Header'}
 
 
-def serialize_par(par):
+def serialize_par(par, owner_path=None):
     """Serialize a single non-default parameter.
 
     Returns a dict with the parameter value (and expression/mode if
     not in constant mode). Returns None for parameters that should
     be skipped (pulses, headers, read-only with no expression).
+
+    When owner_path is provided, bind/export edges are added to the
+    global graph collector.
     """
     try:
         if par.isDefault:
@@ -144,22 +188,24 @@ def serialize_par(par):
         if mode == ParMode.EXPRESSION:
             result['expr'] = par.expr
         elif mode == ParMode.EXPORT:
-            # Export mode: parameter is driven by an export CHOP/DAT
             try:
-                result['export'] = par.exportSource.path if par.exportSource else True
+                source = par.exportSource.path if par.exportSource else None
+                result['export'] = source if source else True
+                if source and owner_path:
+                    _graph_edges.append(['export', source, owner_path + ':' + par.name])
             except (AttributeError, TypeError):
                 result['export'] = True
         elif mode == ParMode.BIND:
-            # Bind mode: parameter references another parameter
             try:
-                result['bind'] = par.bindExpr
+                bind_expr = par.bindExpr
+                result['bind'] = bind_expr
+                if bind_expr and owner_path:
+                    _graph_edges.append(['bind', bind_expr, owner_path + ':' + par.name])
             except (AttributeError, TypeError):
                 result['bind'] = True
         else:
-            # Constant mode -- just store the value
             result['val'] = par.val
     except (AttributeError, TypeError):
-        # Fallback: try to get any value
         try:
             result['val'] = par.val
         except (AttributeError, TypeError):
@@ -171,13 +217,13 @@ def serialize_par(par):
     return result
 
 
-def serialize_par_full(par):
+def serialize_par_full(par, owner_path=None):
     """Serialize a non-default parameter with full metadata.
 
     Includes style (type), label, and range info in addition to value.
     Used by OUTPUT_MODE = 'full'.
     """
-    base = serialize_par(par)
+    base = serialize_par(par, owner_path)
     if base is None:
         return None
 
@@ -214,9 +260,8 @@ def serialize_params(operator):
 
     try:
         for par in operator.pars():
-            data = serialize_fn(par)
+            data = serialize_fn(par, owner_path=operator.path)
             if data is not None:
-                # In compact mode, flatten constant-mode params to bare values
                 if OUTPUT_MODE == 'compact' and list(data.keys()) == ['val']:
                     params[par.name] = data['val']
                 else:
@@ -232,11 +277,15 @@ def serialize_params(operator):
 def serialize_op(operator, depth=0):
     """Serialize an operator and its children recursively.
 
-    When filters are active, containers are only included if they have
-    matching descendants. This keeps the hierarchy readable while still
-    trimming the output aggressively.
+    Connections are collected into the global graph rather than stored
+    per-operator. When filters are active, containers are only included
+    if they have matching descendants.
     """
     if depth > FILTER_MAX_DEPTH:
+        return None
+
+    # System path exclusion (before other filters)
+    if EXCLUDE_SYSTEM and depth == 1 and _is_system_path(operator.path):
         return None
 
     if not path_could_contain_prefix(operator.path):
@@ -244,7 +293,6 @@ def serialize_op(operator, depth=0):
 
     node = {
         'path': operator.path,
-        'name': operator.name,
         'type': operator.type,
         'family': operator.family,
     }
@@ -254,24 +302,14 @@ def serialize_op(operator, depth=0):
     if params:
         node['params'] = params
 
-    # Connections: inputs (compact format -- path array with None for empty slots)
+    # Collect connections into the top-level graph
     try:
-        inputs = [inp.path if inp is not None else None for inp in operator.inputs]
-        # Strip trailing Nones but preserve internal gaps for slot accuracy
-        while inputs and inputs[-1] is None:
-            inputs.pop()
-        if inputs:
-            node['inputs'] = inputs
-    except Exception:
-        pass
-
-    # Connections: outputs (compact format -- path array with None for empty slots)
-    try:
-        outputs = [out.path if out is not None else None for out in operator.outputs]
-        while outputs and outputs[-1] is None:
-            outputs.pop()
-        if outputs:
-            node['outputs'] = outputs
+        inputs = operator.inputs
+        for slot, inp in enumerate(inputs):
+            if inp is not None:
+                # Only add edge if source isn't in an excluded system path
+                if not (EXCLUDE_SYSTEM and _is_system_path(inp.path)):
+                    _graph_edges.append(['input', inp.path, operator.path, slot])
     except Exception:
         pass
 
@@ -291,14 +329,10 @@ def serialize_op(operator, depth=0):
     except Exception:
         pass
 
-    # Filtering logic:
-    # - If no filters are active, include everything (original behavior)
-    # - Containers are included only if they have matching children
-    # - Leaf ops are included only if they pass all filters
+    # Filtering logic
     if has_active_filters():
         if is_container:
             if 'children' not in node or not node['children']:
-                # Container with no matching descendants -- check if it matches on its own
                 if not matches_filters(operator):
                     return None
         else:
@@ -324,13 +358,136 @@ def flatten_ops(node):
     return ops
 
 
+# ─── Template Detection ──────────────────────────────────────────────
+
+def _detect_templates(root_node):
+    """Detect repeated operator signatures and extract templates.
+
+    A signature is (type, family, frozenset of non-default param names).
+    Operators sharing a signature get a template; per-instance param
+    values become overrides.
+
+    Returns:
+        templates: dict of {template_id: {type, family}}
+        The root_node is modified in-place -- templateable operators get
+        'template' and optional 'overrides' keys, with type/family/params removed.
+    """
+    # First pass: collect all leaf operators by signature
+    sig_groups = {}  # signature -> list of node references
+
+    def collect_leaves(node):
+        if 'children' in node:
+            for child in node['children']:
+                collect_leaves(child)
+        else:
+            param_keys = frozenset(node.get('params', {}).keys()) if 'params' in node else frozenset()
+            sig = (node['type'], node['family'], param_keys)
+            sig_groups.setdefault(sig, []).append(node)
+
+    collect_leaves(root_node)
+
+    # Only create templates for signatures with 2+ instances
+    templates = {}
+    template_counter = 0
+
+    for sig, nodes in sig_groups.items():
+        if len(nodes) < 2:
+            continue
+
+        op_type, op_family, param_keys = sig
+        template_id = 't' + str(template_counter)
+        template_counter += 1
+
+        templates[template_id] = {
+            'type': op_type,
+            'family': op_family,
+        }
+
+        # Rewrite each node to reference the template
+        for node in nodes:
+            overrides = node.pop('params', None)
+            node.pop('type', None)
+            node.pop('family', None)
+            node['template'] = template_id
+            if overrides:
+                node['overrides'] = overrides
+
+    return templates
+
+
+# ─── Metadata Generation ─────────────────────────────────────────────
+
+def _generate_meta(root_node, graph_edges):
+    """Generate the _meta section with network statistics.
+
+    Must be called BEFORE _detect_templates, which pops type/family
+    from templated nodes.
+    """
+    total_ops = _count_subtree(root_node)
+    subsystems = {}
+
+    for child in root_node.get('children', []):
+        sub_count = _count_subtree(child)
+        sub_types = {}
+        _count_types(child, sub_types)
+        subsystems[child['path']] = {
+            'ops': sub_count,
+            'types': sub_types,
+        }
+
+    # Cross-subsystem connections
+    cross_edges = []
+    for edge in graph_edges:
+        if edge[0] == 'input':
+            src_sub = _get_subsystem(edge[1])
+            dst_sub = _get_subsystem(edge[2])
+            if src_sub and dst_sub and src_sub != dst_sub:
+                cross_edges.append(edge)
+
+    meta = {
+        'total_ops': total_ops,
+        'connections': len(graph_edges),
+        'subsystems': subsystems,
+    }
+
+    if cross_edges:
+        meta['cross_subsystem_connections'] = cross_edges
+
+    if EXCLUDE_SYSTEM:
+        meta['system_excluded'] = list(_SYSTEM_PATHS)
+
+    return meta
+
+
+def _count_subtree(node):
+    count = 1
+    for child in node.get('children', []):
+        count += _count_subtree(child)
+    return count
+
+
+def _count_types(node, types_dict):
+    family = node.get('family', '?')
+    types_dict[family] = types_dict.get(family, 0) + 1
+    for child in node.get('children', []):
+        _count_types(child, types_dict)
+
+
+def _get_subsystem(path):
+    """Extract the top-level subsystem from a path (e.g., '/project1' from '/project1/op1')."""
+    parts = path.strip('/').split('/')
+    if parts:
+        return '/' + parts[0]
+    return None
+
+
 # ─── Main ──────────────────────────────────────────────────────────────
 
 def export_network(root_path='/', output_filename=None,
                    families=None, types=None, path_prefix=None,
                    max_depth=None, include_patterns=None,
                    exclude_patterns=None, output_mode=None,
-                   output_format=None):
+                   output_format=None, exclude_system=None):
     """Export the operator network with optional filtering and format control.
 
     Can be called as a function for programmatic use, or the script
@@ -347,13 +504,14 @@ def export_network(root_path='/', output_filename=None,
         exclude_patterns: fnmatch patterns for operator names to exclude
         output_mode: 'compact', 'summary', or 'full'
         output_format: 'json' or 'jsonl'
+        exclude_system: Skip /sys and /ui subtrees (default: True)
 
     Returns:
-        The serialized data (dict for json, list for jsonl).
+        The structured export data.
     """
     global FILTER_FAMILIES, FILTER_TYPES, FILTER_PATH_PREFIX
     global FILTER_MAX_DEPTH, INCLUDE_PATTERNS, EXCLUDE_PATTERNS
-    global OUTPUT_MODE, OUTPUT_FORMAT
+    global OUTPUT_MODE, OUTPUT_FORMAT, EXCLUDE_SYSTEM
 
     if families is not None:
         FILTER_FAMILIES = families
@@ -371,27 +529,52 @@ def export_network(root_path='/', output_filename=None,
         OUTPUT_MODE = output_mode
     if output_format is not None:
         OUTPUT_FORMAT = output_format
+    if exclude_system is not None:
+        EXCLUDE_SYSTEM = exclude_system
 
     # Default filename based on format
     if output_filename is None:
         ext = 'jsonl' if OUTPUT_FORMAT == 'jsonl' else 'json'
         output_filename = f'network_export.{ext}'
 
+    # Reset and serialize
+    _reset_graph()
     root = op(root_path)
-    data = serialize_op(root)
+    operator_tree = serialize_op(root)
+
+    # Generate metadata (must run before template detection, which pops type/family)
+    meta = _generate_meta(operator_tree, _graph_edges) if operator_tree else {}
+
+    # Detect templates (modifies tree in-place)
+    templates = _detect_templates(operator_tree) if operator_tree else {}
+
+    # Build structured output
+    export_data = {
+        '_meta': meta,
+        'graph': _graph_edges,
+    }
+    if templates:
+        export_data['templates'] = templates
+    export_data['operators'] = operator_tree
 
     output_path = project.folder + '/' + output_filename
 
     if OUTPUT_FORMAT == 'jsonl':
-        ops = flatten_ops(data) if data else []
+        # JSONL: first line is meta+graph+templates, then one line per operator
+        ops = flatten_ops(operator_tree) if operator_tree else []
         with open(output_path, 'w') as f:
+            header = {'_meta': meta, 'graph': _graph_edges}
+            if templates:
+                header['templates'] = templates
+            header_str = json.dumps(header, default=str)
+            f.write(header_str + '\n')
             for entry in ops:
                 f.write(json.dumps(entry, default=str) + '\n')
-        size_kb = sum(len(json.dumps(e, default=str)) for e in ops) / 1024
+        size_kb = (len(header_str) + sum(len(json.dumps(e, default=str)) for e in ops)) / 1024
         print(f"Exported {len(ops)} operators to: {output_path}")
     else:
         indent = None if OUTPUT_MODE == 'compact' else 2
-        json_str = json.dumps(data, indent=indent, default=str)
+        json_str = json.dumps(export_data, indent=indent, default=str)
         with open(output_path, 'w') as f:
             f.write(json_str)
         size_kb = len(json_str) / 1024
@@ -399,6 +582,15 @@ def export_network(root_path='/', output_filename=None,
 
     print(f"Output size: {size_kb:.0f} KB")
     print(f"Mode: {OUTPUT_MODE}, Format: {OUTPUT_FORMAT}")
+
+    if templates:
+        template_ops = sum(1 for _ in _iter_ops(operator_tree) if 'template' in _)
+        print(f"Templates: {len(templates)} (covering {template_ops} operators)")
+
+    print(f"Graph edges: {len(_graph_edges)}")
+
+    if EXCLUDE_SYSTEM:
+        print(f"System paths excluded: {', '.join(_SYSTEM_PATHS)}")
 
     active = []
     if FILTER_FAMILIES:
@@ -415,7 +607,14 @@ def export_network(root_path='/', output_filename=None,
     if active:
         print(f"Active filters: {', '.join(active)}")
 
-    return ops if OUTPUT_FORMAT == 'jsonl' else data
+    return export_data
+
+
+def _iter_ops(node):
+    """Iterate all operators in a tree (depth-first)."""
+    yield node
+    for child in node.get('children', []):
+        yield from _iter_ops(child)
 
 
 # When run directly (exec from Text DAT), use module-level config
